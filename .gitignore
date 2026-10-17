@@ -53,3 +53,16 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# STM32CubeIDE build artifacts
+**/Debug/
+**/Release/
+**/.settings/
+*.launch
+
+# Matlab / Simulink artifacts
+slprj/
+*_ert_rtw/
+*.slxc
+*.asv
+*.mexw64
