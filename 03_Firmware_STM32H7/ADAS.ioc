@@ -2,7 +2,9 @@
 CAD.formats=
 CAD.pinconfig=
 CAD.provider=
-CORTEX_M7.IPParameters=default_mode_Activation
+CORTEX_M7.CPU_DCache=Enabled
+CORTEX_M7.CPU_ICache=Enabled
+CORTEX_M7.IPParameters=default_mode_Activation,CPU_ICache,CPU_DCache
 CORTEX_M7.default_mode_Activation=1
 FREERTOS.FootprintOK=true
 FREERTOS.IPParameters=Tasks01,configTOTAL_HEAP_SIZE,FootprintOK
@@ -190,4 +192,5 @@ VP_MEMORYMAP_VS_MEMORYMAP.Signal=MEMORYMAP_VS_MEMORYMAP
 VP_SYS_VS_tim6.Mode=TIM6
 VP_SYS_VS_tim6.Signal=SYS_VS_tim6
 board=custom
+rtos.0.ip=FREERTOS
 isbadioc=false
