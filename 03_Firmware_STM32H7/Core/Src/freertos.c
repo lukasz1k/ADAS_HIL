@@ -22,6 +22,7 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
+#include "fdcan.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -52,14 +53,17 @@ typedef enum {
 	ACC_ZONE_CRITICAL /*  < 25m: red LED 		*/
 } AccZoneState_t;
 
-volatile AccZoneState_t g_eCurrentAccZone = ACC_ZONE_SAFE;
-
 /* Diagnostic variables to observe in Live Expressions (SWD) */
 volatile uint32_t g_ulControlLoopCounter = 0U;
 volatile uint32_t g_ulLastExecutionCycles = 0U;
 volatile uint32_t g_ulMaxExecutionCycles = 0U;
 
 volatile uint32_t g_ulRadarDistanceMeters = 100U;
+
+volatile AccZoneState_t g_eCurrentAccZone = ACC_ZONE_SAFE;
+
+volatile uint8_t g_ucCanRxData[8] = { 0U };
+volatile uint32_t g_ulCanRxFrameCounter = 0U;
 
 /* USER CODE END Variables */
 /* Definitions for ControlLoopTask */
@@ -132,6 +136,31 @@ void StartControlLoopTask(void *argument) {
 	DWT->CYCCNT = 0U;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
+	/* Configuration of CAN transmitter header (ID = 0x100, 8 bytes) */
+	FDCAN_TxHeaderTypeDef sTxHeader = { 0 };
+	sTxHeader.Identifier = 0x100U;
+	sTxHeader.IdType = FDCAN_STANDARD_ID;
+	sTxHeader.TxFrameType = FDCAN_DATA_FRAME;
+	sTxHeader.DataLength = FDCAN_DLC_BYTES_8;
+	sTxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+	sTxHeader.BitRateSwitch = FDCAN_BRS_OFF;
+	sTxHeader.FDFormat = FDCAN_CLASSIC_CAN;
+	sTxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+	sTxHeader.MessageMarker = 0U;
+
+	/* Konfiguracja filtra odbiorczego nr 0 (akceptuj ramki od ID 0x000 do 0x7FF do RX FIFO0) */
+	FDCAN_FilterTypeDef sFilterConfig = { 0 };
+	sFilterConfig.IdType = FDCAN_STANDARD_ID;
+	sFilterConfig.FilterIndex = 0U;
+	sFilterConfig.FilterType = FDCAN_FILTER_RANGE;
+	sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+	sFilterConfig.FilterID1 = 0x000U;
+	sFilterConfig.FilterID2 = 0x7FFU;
+	(void) HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig);
+
+	/* Starting FDCAN1 Controller */
+	(void) HAL_FDCAN_Start(&hfdcan1);
+
 	const uint32_t kPeriodTicks = 250U; /* Okres pętli: 250 ms (częstotliwość 4 Hz dla testu LED) */
 	uint32_t ulWakeTick = osKernelGetTickCount();
 	/* Infinite loop */
@@ -168,6 +197,32 @@ void StartControlLoopTask(void *argument) {
 			HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
 					GPIO_PIN_RESET);
 			HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+		}
+
+		uint8_t ucTxData[8] = { 0U };
+		/* Packing Data to Tx table */
+		ucTxData[0] = (uint8_t) g_ulRadarDistanceMeters;
+		ucTxData[1] = (uint8_t) g_eCurrentAccZone;
+		ucTxData[2] = (uint8_t) (g_ulControlLoopCounter & 0xFFU);
+
+		/* Sending CAN frame */
+		if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sTxHeader, ucTxData)
+				== HAL_OK) {
+			/* Odczekanie krótkiej chwili lub odczyt ramki z bufora RX FIFO0 w kolejnym kroku */
+		}
+
+		/* Checking if there is received frame waiting in RX FIFO0 queue */
+		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U) {
+			FDCAN_RxHeaderTypeDef sRxHeader;
+			uint8_t ucTempRx[8];
+
+			if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &sRxHeader,
+					ucTempRx) == HAL_OK) {
+				for (uint32_t i = 0U; i < 8U; i++) {
+					g_ucCanRxData[i] = ucTempRx[i];
+				}
+				g_ulCanRxFrameCounter++;
+			}
 		}
 
 		g_ulControlLoopCounter++;
