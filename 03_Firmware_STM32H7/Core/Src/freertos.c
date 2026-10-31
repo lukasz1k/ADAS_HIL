@@ -22,11 +22,10 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
-#include "fdcan.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "fdcan.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -170,11 +169,37 @@ void StartControlLoopTask(void *argument) {
 
 		/* --- POCZĄTEK SEKCJI KRYTYCZNEJ KROKU STEROWANIA --- */
 
-		if (g_ulRadarDistanceMeters == 0U) {
-			g_ulRadarDistanceMeters = 100U;
-		} else {
-			g_ulRadarDistanceMeters -= 2U;
+//		if (g_ulRadarDistanceMeters == 0U) {
+//			g_ulRadarDistanceMeters = 100U;
+//		} else {
+//			g_ulRadarDistanceMeters -= 2U;
+//		}
+		/* =============================================================================
+		 * KROK 1: WEJŚCIA (RX) - Odbiór rozkazów z komputera PC (ramka 0x200)
+		 * ============================================================================= */
+
+		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U) {
+			FDCAN_RxHeaderTypeDef sRxHeader;
+			uint8_t ucTempRx[8];
+
+			if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &sRxHeader,
+					ucTempRx) == HAL_OK) {
+
+				/* Jeśli przyszła ramka 0x200 z PC, pobieramy z niej nowy dystans */
+				if (sRxHeader.Identifier == 0x200U) {
+					g_ulRadarDistanceMeters = (uint32_t) ucTempRx[0];
+				}
+				/* Kopia diagnostyczna wszystkich 8 bajtów do Live Expressions */
+				for (uint32_t i = 0U; i < 8U; i++) {
+					g_ucCanRxData[i] = ucTempRx[i];
+				}
+				g_ulCanRxFrameCounter++;
+			}
 		}
+
+		/* ==========================================================================
+		 * KROK 2: OBLICZENIA (COMPUTE) - Maszyna stanów ACC i sterowanie LED
+		 * ========================================================================== */
 
 		/* Logika LED */
 		if (g_ulRadarDistanceMeters > 50U) {
@@ -199,31 +224,17 @@ void StartControlLoopTask(void *argument) {
 			HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
 		}
 
+		/* ==========================================================================
+		 * KROK 3: WYJŚCIA (TX) - Wysyłka raportu ze STM32 do PC (ramka 0x100)
+		 * ========================================================================== */
+
 		uint8_t ucTxData[8] = { 0U };
 		/* Packing Data to Tx table */
 		ucTxData[0] = (uint8_t) g_ulRadarDistanceMeters;
 		ucTxData[1] = (uint8_t) g_eCurrentAccZone;
 		ucTxData[2] = (uint8_t) (g_ulControlLoopCounter & 0xFFU);
 
-		/* Sending CAN frame */
-		if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sTxHeader, ucTxData)
-				== HAL_OK) {
-			/* Odczekanie krótkiej chwili lub odczyt ramki z bufora RX FIFO0 w kolejnym kroku */
-		}
-
-		/* Checking if there is received frame waiting in RX FIFO0 queue */
-		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U) {
-			FDCAN_RxHeaderTypeDef sRxHeader;
-			uint8_t ucTempRx[8];
-
-			if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &sRxHeader,
-					ucTempRx) == HAL_OK) {
-				for (uint32_t i = 0U; i < 8U; i++) {
-					g_ucCanRxData[i] = ucTempRx[i];
-				}
-				g_ulCanRxFrameCounter++;
-			}
-		}
+		(void) HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sTxHeader, ucTxData);
 
 		g_ulControlLoopCounter++;
 
@@ -240,8 +251,8 @@ void StartControlLoopTask(void *argument) {
 		ulWakeTick += kPeriodTicks;
 		osDelayUntil(ulWakeTick);
 	}
-	/* USER CODE END StartControlLoopTask */
 }
+/* USER CODE END StartControlLoopTask */
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
