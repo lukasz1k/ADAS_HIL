@@ -26,6 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "fdcan.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,12 +58,16 @@ volatile uint32_t g_ulControlLoopCounter = 0U;
 volatile uint32_t g_ulLastExecutionCycles = 0U;
 volatile uint32_t g_ulMaxExecutionCycles = 0U;
 
-volatile uint32_t g_ulRadarDistanceMeters = 100U;
+volatile uint16_t g_usRadarDistanceCm = 10000U;
+volatile float g_fDesiredAccelMps2 = 0.0f;
 
 volatile AccZoneState_t g_eCurrentAccZone = ACC_ZONE_SAFE;
 
-volatile uint8_t g_ucCanRxData[8] = { 0U };
+volatile uint8_t g_ucCanRxData[64] = { 0U };
 volatile uint32_t g_ulCanRxFrameCounter = 0U;
+
+volatile FDCAN_ProtocolStatusTypeDef g_sCanProtocolStatus = { 0 };
+volatile FDCAN_ErrorCountersTypeDef g_sCanErrorCounters = { 0 };
 
 /* USER CODE END Variables */
 /* Definitions for ControlLoopTask */
@@ -140,14 +145,14 @@ void StartControlLoopTask(void *argument) {
 	sTxHeader.Identifier = 0x100U;
 	sTxHeader.IdType = FDCAN_STANDARD_ID;
 	sTxHeader.TxFrameType = FDCAN_DATA_FRAME;
-	sTxHeader.DataLength = FDCAN_DLC_BYTES_8;
+	sTxHeader.DataLength = FDCAN_DLC_BYTES_64;
 	sTxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-	sTxHeader.BitRateSwitch = FDCAN_BRS_OFF;
-	sTxHeader.FDFormat = FDCAN_CLASSIC_CAN;
+	sTxHeader.BitRateSwitch = FDCAN_BRS_ON;
+	sTxHeader.FDFormat = FDCAN_FD_CAN;
 	sTxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
 	sTxHeader.MessageMarker = 0U;
 
-	/* Konfiguracja filtra odbiorczego nr 0 (akceptuj ramki od ID 0x000 do 0x7FF do RX FIFO0) */
+	/* Konfiguracja filtru odbiorczego nr 0 (akceptuj ramki od ID 0x000 do 0x7FF do RX FIFO0) */
 	FDCAN_FilterTypeDef sFilterConfig = { 0 };
 	sFilterConfig.IdType = FDCAN_STANDARD_ID;
 	sFilterConfig.FilterIndex = 0U;
@@ -162,6 +167,7 @@ void StartControlLoopTask(void *argument) {
 
 	const uint32_t kPeriodTicks = 250U; /* Okres pętli: 250 ms (częstotliwość 4 Hz dla testu LED) */
 	uint32_t ulWakeTick = osKernelGetTickCount();
+
 	/* Infinite loop */
 	for (;;) {
 		/* Pomiar startu kroku obliczeniowego */
@@ -169,28 +175,24 @@ void StartControlLoopTask(void *argument) {
 
 		/* --- POCZĄTEK SEKCJI KRYTYCZNEJ KROKU STEROWANIA --- */
 
-//		if (g_ulRadarDistanceMeters == 0U) {
-//			g_ulRadarDistanceMeters = 100U;
-//		} else {
-//			g_ulRadarDistanceMeters -= 2U;
-//		}
 		/* =============================================================================
 		 * KROK 1: WEJŚCIA (RX) - Odbiór rozkazów z komputera PC (ramka 0x200)
 		 * ============================================================================= */
 
-		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U) {
+		while (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U) {
 			FDCAN_RxHeaderTypeDef sRxHeader;
-			uint8_t ucTempRx[8];
+			static uint8_t ucTempRx[64];
 
 			if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &sRxHeader,
 					ucTempRx) == HAL_OK) {
 
 				/* Jeśli przyszła ramka 0x200 z PC, pobieramy z niej nowy dystans */
 				if (sRxHeader.Identifier == 0x200U) {
-					g_ulRadarDistanceMeters = (uint32_t) ucTempRx[0];
+					g_usRadarDistanceCm = (uint16_t) (((uint16_t) ucTempRx[1]
+							<< 8U) | (uint16_t) ucTempRx[0]);
 				}
 				/* Kopia diagnostyczna wszystkich 8 bajtów do Live Expressions */
-				for (uint32_t i = 0U; i < 8U; i++) {
+				for (uint32_t i = 0U; i < 64U; i++) {
 					g_ucCanRxData[i] = ucTempRx[i];
 				}
 				g_ulCanRxFrameCounter++;
@@ -198,18 +200,20 @@ void StartControlLoopTask(void *argument) {
 		}
 
 		/* ==========================================================================
-		 * KROK 2: OBLICZENIA (COMPUTE) - Maszyna stanów ACC i sterowanie LED
+		 * KROK 2: OBLICZENIA (COMPUTE) - Maszyna stanów ACC
 		 * ========================================================================== */
 
 		/* Logika LED */
-		if (g_ulRadarDistanceMeters > 50U) {
+		if (g_usRadarDistanceCm > 5000U) {
 			g_eCurrentAccZone = ACC_ZONE_SAFE;
+			g_fDesiredAccelMps2 = 1.5f; /* +1.5 m/s^2 (w HEX: 00 00 C0 3F) */
 			HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
 			HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
 					GPIO_PIN_RESET);
 			HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
-		} else if (g_ulRadarDistanceMeters >= 25U) {
+		} else if (g_usRadarDistanceCm >= 2500U) {
 			g_eCurrentAccZone = ACC_ZONE_WARNING;
+			g_fDesiredAccelMps2 = -1.25f; /* -1.25 m/s^2 (w HEX: 00 00 A0 BF) */
 			HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin,
 					GPIO_PIN_RESET);
 			HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
@@ -217,6 +221,7 @@ void StartControlLoopTask(void *argument) {
 			HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
 		} else {
 			g_eCurrentAccZone = ACC_ZONE_CRITICAL;
+			g_fDesiredAccelMps2 = -3.5f; /* -3.5 m/s^2 (w HEX: 00 00 60 C0) */
 			HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin,
 					GPIO_PIN_RESET);
 			HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
@@ -228,13 +233,29 @@ void StartControlLoopTask(void *argument) {
 		 * KROK 3: WYJŚCIA (TX) - Wysyłka raportu ze STM32 do PC (ramka 0x100)
 		 * ========================================================================== */
 
-		uint8_t ucTxData[8] = { 0U };
+		float fAccelTemp = g_fDesiredAccelMps2;
+		static uint8_t ucTxData[64] = { 0U };
 		/* Packing Data to Tx table */
-		ucTxData[0] = (uint8_t) g_ulRadarDistanceMeters;
-		ucTxData[1] = (uint8_t) g_eCurrentAccZone;
-		ucTxData[2] = (uint8_t) (g_ulControlLoopCounter & 0xFFU);
+		ucTxData[0] = (uint8_t) (g_usRadarDistanceCm & 0xFFU);
+		ucTxData[1] = (uint8_t) ((g_usRadarDistanceCm >> 8U) & 0xFFU);
+		ucTxData[2] = (uint8_t) g_eCurrentAccZone;
+		ucTxData[3] = (uint8_t) (g_ulControlLoopCounter & 0xFFU);
+		(void) memcpy(&ucTxData[4], &fAccelTemp, sizeof(float));
+
+		/* Control flag at the end of the 64-bytes CAN frame */
+		ucTxData[62] = 0xCAU;
+		ucTxData[63] = 0xFEU;
 
 		(void) HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sTxHeader, ucTxData);
+
+		FDCAN_ProtocolStatusTypeDef sTempStatus;
+		FDCAN_ErrorCountersTypeDef sTempErrors;
+		if (HAL_FDCAN_GetProtocolStatus(&hfdcan1, &sTempStatus) == HAL_OK) {
+			g_sCanProtocolStatus = sTempStatus;
+		}
+		if (HAL_FDCAN_GetErrorCounters(&hfdcan1, &sTempErrors) == HAL_OK) {
+			g_sCanErrorCounters = sTempErrors;
+		}
 
 		g_ulControlLoopCounter++;
 
