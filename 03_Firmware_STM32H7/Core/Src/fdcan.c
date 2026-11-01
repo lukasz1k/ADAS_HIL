@@ -42,16 +42,17 @@ void MX_FDCAN1_Init(void) {
 	hfdcan1.Init.AutoRetransmission = ENABLE;
 	hfdcan1.Init.TransmitPause = DISABLE;
 	hfdcan1.Init.ProtocolException = ENABLE;
-	/* 1. BIEG (Nominal: 500 kbps, 100 tq po 20 ns = 2000 ns, Sample Point = 87.0% pod CANgaroo 87.5%) */
+	/* Faza arbitrażu: 500 kbps (f_FDCAN = 100 MHz, 1 tq = 20 ns, 100 tq = 2000 ns, SP = 87.0%) */
 	hfdcan1.Init.NominalPrescaler = 2;
 	hfdcan1.Init.NominalSyncJumpWidth = 13;
 	hfdcan1.Init.NominalTimeSeg1 = 86;
 	hfdcan1.Init.NominalTimeSeg2 = 13;
-	/* 2. BIEG (Data BRS: 2 Mbps, 25 tq po 20 ns = 500 ns, Sample Point = 76.0% pod CANgaroo 75.0%) */
+	/* Faza danych (BRS): 2 Mbps (f_FDCAN = 100 MHz, 1 tq = 20 ns, 25 tq = 500 ns, SP = 76.0%) */
 	hfdcan1.Init.DataPrescaler = 2;
 	hfdcan1.Init.DataSyncJumpWidth = 6;
 	hfdcan1.Init.DataTimeSeg1 = 18;
 	hfdcan1.Init.DataTimeSeg2 = 6;
+	/* Organizacja pamięci Message RAM (bufory 64-bajtowe) */
 	hfdcan1.Init.MessageRAMOffset = 0;
 	hfdcan1.Init.StdFiltersNbr = 1;
 	hfdcan1.Init.ExtFiltersNbr = 0;
