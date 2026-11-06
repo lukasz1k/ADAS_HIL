@@ -26,49 +26,39 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "fdcan.h"
+#include "acc_controller.h"
 #include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-typedef enum {
-	ACC_ZONE_SAFE = 0U, /*  > 50m: green LED 	 */
-	ACC_ZONE_WARNING = 1U, /*  25-50m: yellow LED  */
-	ACC_ZONE_CRITICAL = 2U, /*  < 25m: red LED 	 */
-	ACC_ZONE_FAULT = 3U
-} AccZoneState_t;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 
+/* Zmienne diagnostyczne czasu wykonania pętli RTOS (DWT WCET Profiling) */
 volatile uint32_t g_ulControlLoopCounter = 0U;
 volatile uint32_t g_ulLastExecutionCycles = 0U;
 volatile uint32_t g_ulMaxExecutionCycles = 0U;
 
-volatile uint16_t g_usRadarDistanceCm = 10000U; /* Start: 10 000 cm = 100.00 m */
-volatile AccZoneState_t g_eCurrentAccZone = ACC_ZONE_SAFE;
-volatile float g_fDesiredAccelMps2 = 0.0f;
-
+/* Bufory i liczniki diagnostyczne komunikacji CAN FD */
 volatile uint8_t g_ucCanRxData[64] = { 0U };
 volatile uint32_t g_ulCanRxFrameCounter = 0U;
-
 volatile FDCAN_ProtocolStatusTypeDef g_sCanProtocolStatus = { 0 };
 volatile FDCAN_ErrorCountersTypeDef g_sCanErrorCounters = { 0 };
 
-volatile uint32_t g_ulCanRxTimeoutCounter = 0U;
-
-volatile float g_fDistanceErrorMeters = 0.0f;
+/* Główne struktury wejść i wyjść regulatora ACC (obserwowane w Live Expressions) */
+volatile AccInputs_t g_sAccInputs = { 10000U, 0, 2000U, 0U };
+volatile AccOutputs_t g_sAccOutputs = { 35.0f, 0.0f, 0.0f, 0.0f, ACC_ZONE_SAFE };
 
 /* USER CODE END Variables */
 /* Definitions for ControlLoopTask */
@@ -78,6 +68,39 @@ const osThreadAttr_t ControlLoopTask_attributes = { .name = "ControlLoopTask",
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+
+/**
+ * @brief Funkcja warstwy sprzętowej (BSP/HAL) sterująca diodami LED na płytce Nucleo
+ * @param eZone Aktualna strefa bezpieczeństwa wyznaczona przez regulator ACC
+ */
+static void ACC_UpdateLeds(AccZoneState_t eZone) {
+	switch (eZone) {
+	case ACC_ZONE_SAFE:
+		HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+		break;
+
+	case ACC_ZONE_WARNING:
+		HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+		break;
+
+	case ACC_ZONE_CRITICAL:
+		HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+		break;
+
+	case ACC_ZONE_FAULT:
+	default:
+		HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+		break;
+	}
+}
 
 /* USER CODE END FunctionPrototypes */
 
@@ -128,7 +151,7 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartControlLoopTask */
 /**
- * @brief  Function implementing the ControlLoopTask thread.
+ * @brief  Główne zadanie czasu rzeczywistego realizujące pętlę HIL (Read -> Compute -> Write)
  * @param  argument: Not used
  * @retval None
  */
@@ -167,7 +190,6 @@ void StartControlLoopTask(void *argument) {
 	(void) HAL_FDCAN_Start(&hfdcan1);
 
 	const uint32_t kPeriodTicks = 250U; /* Okres pętli: 250 ms (częstotliwość 4 Hz) */
-	const uint32_t kMaxRxTimeoutSteps = 4U; /* Timeout po 4 krokach (1000 ms bez ramki 0x200) */
 	uint32_t ulWakeTick = osKernelGetTickCount();
 
 	/* Infinite loop */
@@ -178,12 +200,12 @@ void StartControlLoopTask(void *argument) {
 		/* --- POCZĄTEK SEKCJI KRYTYCZNEJ KROKU STEROWANIA --- */
 
 		/* ====================================================================
-		 * KROK 1: WEJŚCIA (RX) - Opróżnienie kolejki RX FIFO0 (ramka 0x200 z PC)
+		 * KROK 1: WEJŚCIA (RX) - Nadzór Timeoutu i opróżnienie kolejki RX FIFO0
 		 * ==================================================================== */
 
 		/* Inkrementacja z nasyceniem (ochrona przed przekręceniem licznika uint32_t) */
-		if (g_ulCanRxTimeoutCounter <= kMaxRxTimeoutSteps) {
-			g_ulCanRxTimeoutCounter++;
+		if (g_sAccInputs.ulRxTimeoutCounter <= ACC_MAX_RX_TIMEOUT_STEPS) {
+			g_sAccInputs.ulRxTimeoutCounter++;
 		}
 
 		while (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U) {
@@ -193,11 +215,24 @@ void StartControlLoopTask(void *argument) {
 			if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &sRxHeader,
 					ucTempRx) == HAL_OK) {
 
-				/* Deserializacja 16-bitowego dystansu (Little-Endian) z ramki 0x200 */
+				/* Deserializacja sygnałów pomiarowych (Little-Endian) z ramki 0x200 */
 				if (sRxHeader.Identifier == 0x200U) {
-					g_ulCanRxTimeoutCounter = 0U;
-					g_usRadarDistanceCm = (uint16_t) (((uint16_t) ucTempRx[1]
-							<< 8U) | (uint16_t) ucTempRx[0]);
+					g_sAccInputs.ulRxTimeoutCounter = 0U;
+
+					/* Bajty 0..1: Dystans radaru uint16_t [cm] */
+					g_sAccInputs.usRadarDistanceCm =
+							(uint16_t) (((uint16_t) ucTempRx[1] << 8U)
+									| (uint16_t) ucTempRx[0]);
+
+					/* Bajty 2..3: Prędkość względna int16_t [cm/s] (kod U2) */
+					g_sAccInputs.sRelativeVelocityCms =
+							(int16_t) (((uint16_t) ucTempRx[3] << 8U)
+									| (uint16_t) ucTempRx[2]);
+
+					/* Bajty 4..5: Prędkość własna pojazdu uint16_t [cm/s] */
+					g_sAccInputs.usEgoVelocityCms =
+							(uint16_t) (((uint16_t) ucTempRx[5] << 8U)
+									| (uint16_t) ucTempRx[4]);
 				}
 
 				/* Kopia diagnostyczna wszystkich 64 bajtów do Live Expressions */
@@ -209,84 +244,35 @@ void StartControlLoopTask(void *argument) {
 		}
 
 		/* ====================================================================
-		 * KROK 2: OBLICZENIA (COMPUTE) - Nadzór Fail-Safe, Regulator P i LED
+		 * KROK 2: OBLICZENIA (COMPUTE) - Wywołanie modułu regulatora ACC
 		 * ==================================================================== */
-
-		/* NADRZĘDNA KONTROLA BEZPIECZEŃSTWA (ISO 26262 Fail-Safe Override) */
-		if (g_ulCanRxTimeoutCounter > kMaxRxTimeoutSteps) {
-			/* Stan bezpieczny: odcięcie przyspieszenia i sygnalizacja awarii */
-			g_eCurrentAccZone = ACC_ZONE_FAULT;
-			g_fDistanceErrorMeters = 0.0f;
-			g_fDesiredAccelMps2 = 0.0f;
-
-			HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-			HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
-					GPIO_PIN_SET);
-			HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-		} else {
-			/* --- BLOK 2A: Ciągły regulator P z nasyceniem (Clamping) --- */
-			const float kTargetDistanceCm = 4000.0f;
-			const float kKpGain = 0.1f;
-			const float kMaxAccelMps2 = 1.5f;
-			const float kMinAccelMps2 = -3.5f;
-
-			g_fDistanceErrorMeters = ((float) g_usRadarDistanceCm
-					- kTargetDistanceCm) / 100.0f;
-			float fRawAccel = kKpGain * g_fDistanceErrorMeters;
-
-			if (fRawAccel > kMaxAccelMps2) {
-				g_fDesiredAccelMps2 = kMaxAccelMps2;
-			} else if (fRawAccel < kMinAccelMps2) {
-				g_fDesiredAccelMps2 = kMinAccelMps2;
-			} else {
-				g_fDesiredAccelMps2 = fRawAccel;
-			} /* <-- Koniec bloku nasycenia regulatora P! */
-
-			/* --- BLOK 2B: Maszyna stanów stref ACC i sygnalizacja LED --- */
-			if (g_usRadarDistanceCm > 5000U) {
-				g_eCurrentAccZone = ACC_ZONE_SAFE;
-				HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin,
-						GPIO_PIN_SET);
-				HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
-						GPIO_PIN_RESET);
-				HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin,
-						GPIO_PIN_RESET);
-			} else if (g_usRadarDistanceCm >= 2500U) {
-				g_eCurrentAccZone = ACC_ZONE_WARNING;
-				HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin,
-						GPIO_PIN_RESET);
-				HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
-						GPIO_PIN_SET);
-				HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin,
-						GPIO_PIN_RESET);
-			} else {
-				g_eCurrentAccZone = ACC_ZONE_CRITICAL;
-				HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin,
-						GPIO_PIN_RESET);
-				HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin,
-						GPIO_PIN_RESET);
-				HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-			}
-		}
+		ACC_ComputeStep(&g_sAccInputs, &g_sAccOutputs);
 
 		/* ====================================================================
-		 * KROK 3: WYJŚCIA (TX) - Serializacja i wysyłka ramki 64B CAN FD (0x100)
+		 * KROK 3: WYJŚCIA (TX & GPIO) - Sygnalizacja LED i wysyłka ramki 0x100
 		 * ==================================================================== */
+		ACC_UpdateLeds(g_sAccOutputs.eCurrentZone);
+
 		static uint8_t ucTxData[64] = { 0U };
 
-		/* Bajty 0..1: Dystans uint16_t w cm (Little-Endian: LSB, MSB) */
-		ucTxData[0] = (uint8_t) (g_usRadarDistanceCm & 0xFFU);
-		ucTxData[1] = (uint8_t) ((g_usRadarDistanceCm >> 8U) & 0xFFU);
+		/* Bajty 0..1: Aktualny dystans uint16_t w cm (Little-Endian: LSB, MSB) */
+		ucTxData[0] = (uint8_t) (g_sAccInputs.usRadarDistanceCm & 0xFFU);
+		ucTxData[1] =
+				(uint8_t) ((g_sAccInputs.usRadarDistanceCm >> 8U) & 0xFFU);
 
-		/* Bajt 2: Strefa bezpieczeństwa ACC (enum) */
-		ucTxData[2] = (uint8_t) g_eCurrentAccZone;
+		/* Bajt 2: Strefa bezpieczeństwa ACC (enum: 0..3) */
+		ucTxData[2] = (uint8_t) g_sAccOutputs.eCurrentZone;
 
 		/* Bajt 3: Licznik życia (Alive Counter 0..255) */
 		ucTxData[3] = (uint8_t) (g_ulControlLoopCounter & 0xFFU);
 
-		/* Bajty 4..7: Zadane przyspieszenie float (IEEE-754 Little-Endian) */
-		float fAccelTemp = g_fDesiredAccelMps2;
+		/* Bajty 4..7: Zadane przyspieszenie po ograniczniku zrywu float [m/s^2] */
+		float fAccelTemp = g_sAccOutputs.fDesiredAccelMps2;
 		(void) memcpy(&ucTxData[4], &fAccelTemp, sizeof(float));
+
+		/* Bajty 8..11: Dynamiczny dystans zadany CTH float [m] */
+		float fTargetDistTemp = g_sAccOutputs.fTargetDistanceMeters;
+		(void) memcpy(&ucTxData[8], &fTargetDistTemp, sizeof(float));
 
 		/* Bajty 62..63: Znacznik kontrolny końca 64-bajtowej ramki CAN FD */
 		ucTxData[62] = 0xCAU;
@@ -325,4 +311,3 @@ void StartControlLoopTask(void *argument) {
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-
