@@ -28,7 +28,9 @@ void ACC_ComputeStep(const volatile AccInputs_t *pIn,
 		const float kKvVelocityGain = 0.8f;       /* Wzmocnienie członu prędkości względnej K_v */
 		const float kMaxAccelMps2 = 1.5f;         /* Górne nasycenie przyspieszenia [m/s^2] */
 		const float kMinAccelMps2 = -3.5f;        /* Dolne nasycenie hamowania [m/s^2] */
-		const float kMaxAccelStepMps2 = 1.0f;     /* Limit zrywu: max 0.5 m/s^2 na krok 250 ms (2.0 m/s^3) */
+		const float kSampleTimeSec = (float)ACC_CONTROL_PERIOD_MS / 1000.0f;  /* Okres próbkowania pętli regulatora [ms] */
+		const float kMaxJerkMps3 = 2.5f;		  /* Maksymalny dopuszczalny zryw wg normy ISO 15622 */
+		const float kMaxAccelStepMps2 = kSampleTimeSec * kMaxJerkMps3;     /* Limit zrywu */
 
 		/* Konwersja jednostek stałoprzecinkowych z CAN (cm, cm/s) na układ SI (m, m/s) */
 		float fMeasDistMeters = (float) pIn->usRadarDistanceCm / 100.0f;

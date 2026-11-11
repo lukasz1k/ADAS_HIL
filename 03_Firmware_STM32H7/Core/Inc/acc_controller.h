@@ -10,8 +10,10 @@
 
 #include <stdint.h>
 
-/* Maksymalna liczba kroków pętli bez ramki CAN przed wejściem w Fail-Safe (4 * 250 ms = 1.0 s) */
-#define ACC_MAX_RX_TIMEOUT_STEPS (10U)
+/* Maksymalna liczba kroków pętli bez ramki CAN przed wejściem w Fail-Safe (10 * 100 ms = 1.0 s) */
+/* JEDYNE ŹRÓDŁO PRAWDY: Okres pętli sterowania ACC w milisekundach (100 ms = 10 Hz) */
+#define ACC_CONTROL_PERIOD_MS     (100U)
+#define ACC_MAX_RX_TIMEOUT_STEPS  (1000U / ACC_CONTROL_PERIOD_MS) /* Zawsze 1.0 s FTTI! */
 
 /**
  * @brief Strefy bezpieczeństwa tempomatu adaptacyjnego ACC (zgodne z ISO 26262)
