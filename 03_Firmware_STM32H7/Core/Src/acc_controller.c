@@ -24,11 +24,11 @@ void ACC_ComputeStep(const volatile AccInputs_t *pIn,
 		 * ================================================================ */
 		const float kStandStillDistMeters = 5.0f; /* Minimalny odstęp postoju d_min [m] */
 		const float kTimeHeadwaySec = 1.5f;       /* Stały odstęp czasowy t_hw [s] */
-		const float kKpDistanceGain = 0.1f;       /* Wzmocnienie członu uchybu odległości K_p */
-		const float kKvVelocityGain = 0.3f;       /* Wzmocnienie członu prędkości względnej K_v */
+		const float kKpDistanceGain = 0.4f;       /* Wzmocnienie członu uchybu odległości K_p */
+		const float kKvVelocityGain = 0.8f;       /* Wzmocnienie członu prędkości względnej K_v */
 		const float kMaxAccelMps2 = 1.5f;         /* Górne nasycenie przyspieszenia [m/s^2] */
 		const float kMinAccelMps2 = -3.5f;        /* Dolne nasycenie hamowania [m/s^2] */
-		const float kMaxAccelStepMps2 = 0.5f;     /* Limit zrywu: max 0.5 m/s^2 na krok 250 ms (2.0 m/s^3) */
+		const float kMaxAccelStepMps2 = 1.0f;     /* Limit zrywu: max 0.5 m/s^2 na krok 250 ms (2.0 m/s^3) */
 
 		/* Konwersja jednostek stałoprzecinkowych z CAN (cm, cm/s) na układ SI (m, m/s) */
 		float fMeasDistMeters = (float) pIn->usRadarDistanceCm / 100.0f;

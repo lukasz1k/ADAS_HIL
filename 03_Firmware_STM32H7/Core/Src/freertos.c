@@ -189,7 +189,7 @@ void StartControlLoopTask(void *argument) {
 	/* 4. Uruchomienie kontrolera FDCAN1 w trybie Normal Mode */
 	(void) HAL_FDCAN_Start(&hfdcan1);
 
-	const uint32_t kPeriodTicks = 250U; /* Okres pętli: 250 ms (częstotliwość 4 Hz) */
+	const uint32_t kPeriodTicks = 100U; /* Okres pętli: 250 ms (częstotliwość 4 Hz) */
 	uint32_t ulWakeTick = osKernelGetTickCount();
 
 	/* Infinite loop */
